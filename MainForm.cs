@@ -3,6 +3,7 @@ namespace FeimaoTunnel;
 internal sealed class MainForm : Form
 {
     private readonly ConfigStore _store = new();
+    private readonly VideoSettingsStore _videoStore = new();
     private readonly List<TunnelConfig> _configs;
     private readonly ComboBox _profiles = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260 };
     private readonly Label _statusIcon = new() { Text = "●", AutoSize = true, Font = new Font("Segoe UI", 22), ForeColor = Color.Gray };
@@ -10,9 +11,13 @@ internal sealed class MainForm : Form
     private readonly Button _connect = new() { Text = "連線", Width = 160, Height = 46, Enabled = false };
     private readonly Button _import = new() { Text = "匯入 CONF", Width = 100, Height = 32 };
     private readonly Button _delete = new() { Text = "刪除", Width = 65, Height = 32, Enabled = false };
+    private readonly TextBox _videoPage = new() { Width = 260, PlaceholderText = "例如 fmt-4g-vtx" };
+    private readonly Button _saveVideoPage = new() { Text = "保存", Width = 65, Height = 32 };
+    private readonly Button _openVideo = new() { Text = "開啟影像", Width = 100, Height = 32 };
     private readonly NotifyIcon _trayIcon;
     private bool _connected;
     private bool _reallyExit;
+    private bool _exiting;
 
     public MainForm()
     {
@@ -21,14 +26,15 @@ internal sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        ClientSize = new Size(540, 300);
+        ClientSize = new Size(540, 370);
         BackColor = Color.FromArgb(248, 250, 252);
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         _configs = _store.Load();
         _trayIcon = new NotifyIcon { Icon = Icon, Text = "FMT 飛貓科技 VPN 客戶端", Visible = true };
         var trayMenu = new ContextMenuStrip();
         trayMenu.Items.Add("開啟 FMT 飛貓科技 VPN 客戶端", null, (_, _) => RestoreFromTray());
-        trayMenu.Items.Add("結束", null, (_, _) => ExitApplication());
+        trayMenu.Items.Add("開啟 VPN 影像", null, (_, _) => OpenVideo());
+        trayMenu.Items.Add("中斷連線並結束", null, async (_, _) => await ExitApplicationAsync());
         _trayIcon.ContextMenuStrip = trayMenu;
         _trayIcon.DoubleClick += (_, _) => RestoreFromTray();
 
@@ -38,9 +44,10 @@ internal sealed class MainForm : Form
         Controls.Add(header);
 
         var content = new Panel { Dock = DockStyle.Fill, Padding = new Padding(30, 20, 30, 16) };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 7 };
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 68)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(new Label { Text = "連線設定", AutoSize = true, ForeColor = Color.DimGray }, 0, 0);
         var profileRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
@@ -49,20 +56,32 @@ internal sealed class MainForm : Form
         statusRow.Controls.Add(_statusIcon); statusRow.Controls.Add(_statusText); layout.Controls.Add(statusRow, 0, 2);
         var buttonRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Padding = new Padding(150, 5, 0, 0) };
         buttonRow.Controls.Add(_connect); layout.Controls.Add(buttonRow, 0, 3);
+        layout.Controls.Add(new Label { Text = "VPN 影像分頁", AutoSize = true, ForeColor = Color.DimGray }, 0, 4);
+        var videoRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        _videoPage.Text = _videoStore.Load(); videoRow.Controls.Add(_videoPage); videoRow.Controls.Add(_saveVideoPage); videoRow.Controls.Add(_openVideo); layout.Controls.Add(videoRow, 0, 5);
         content.Controls.Add(layout); Controls.Add(content); content.BringToFront();
 
         _import.Click += (_, _) => ImportConfig();
         _delete.Click += (_, _) => DeleteConfig();
         _connect.Click += async (_, _) => await ToggleConnectionAsync();
+        _saveVideoPage.Click += (_, _) => SaveVideoPage();
+        _openVideo.Click += (_, _) => OpenVideo();
         _profiles.SelectedIndexChanged += (_, _) => RefreshProfile();
         FormClosing += OnFormClosing;
+        Resize += OnResize;
         ReloadProfiles();
     }
 
     private TunnelConfig? Selected => _profiles.SelectedIndex >= 0 ? _configs[_profiles.SelectedIndex] : null;
     private static Image? LoadBrandImage() { using var stream = typeof(MainForm).Assembly.GetManifestResourceStream("FMTClient.Assets.fmt-client.png"); return stream is null ? null : new Bitmap(stream); }
     private void ReloadProfiles(int selected = 0) { _profiles.Items.Clear(); _profiles.Items.AddRange(_configs.Select(c => c.Name).ToArray()); if (_profiles.Items.Count > 0) _profiles.SelectedIndex = Math.Clamp(selected, 0, _profiles.Items.Count - 1); else RefreshProfile(); }
-    private void RefreshProfile() { var c = Selected; _connect.Enabled = c is not null; _delete.Enabled = c is not null && !_connected; }
+    private void RefreshProfile()
+    {
+        var config = Selected;
+        _connected = config is not null && FmtTunnelService.IsConnected(config);
+        _connect.Enabled = config is not null; _delete.Enabled = config is not null && !_connected; _profiles.Enabled = !_connected;
+        _connect.Text = _connected ? "中斷連線" : "連線"; SetStatus(_connected, _connected ? "已連線" : "尚未連線");
+    }
 
     private void ImportConfig()
     {
@@ -103,13 +122,49 @@ internal sealed class MainForm : Form
 
     private void SetStatus(bool? connected, string text) { _statusText.Text = text; _statusIcon.ForeColor = connected switch { true => Color.FromArgb(26, 160, 93), false => Color.Gray, null => Color.FromArgb(234, 150, 32) }; }
 
-    private void OnFormClosing(object? sender, FormClosingEventArgs e)
+    private bool SaveVideoPage()
+    {
+        if (_videoStore.Save(_videoPage.Text)) { _videoPage.Text = VideoSettingsStore.Normalize(_videoPage.Text); return true; }
+        MessageBox.Show(this, "請輸入有效的影像分頁名稱。", "VPN 影像分頁", MessageBoxButtons.OK, MessageBoxIcon.Warning); return false;
+    }
+
+    private void OpenVideo() { if (!SaveVideoPage()) return; new VideoForm(_videoPage.Text, Icon).Show(this); }
+
+    private async void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
         if (_reallyExit) { _trayIcon.Visible = false; return; }
-        e.Cancel = true; Hide();
-        _trayIcon.ShowBalloonTip(2000, "FMT 飛貓科技 VPN 客戶端仍在執行", _connected ? "安全連線持續運作中。" : "可從系統匣重新開啟。", ToolTipIcon.Info);
+        e.Cancel = true;
+        await DisconnectAndExitAsync();
+    }
+
+    private void OnResize(object? sender, EventArgs e)
+    {
+        if (WindowState != FormWindowState.Minimized) return;
+        Hide();
+        _trayIcon.ShowBalloonTip(2000, "FMT 飛貓科技 VPN 客戶端在背景執行", _connected ? "VPN 連線持續運作中。" : "可從系統匣重新開啟。", ToolTipIcon.Info);
     }
 
     private void RestoreFromTray() { Show(); WindowState = FormWindowState.Normal; Activate(); }
-    private void ExitApplication() { _reallyExit = true; _trayIcon.Visible = false; Close(); }
+    private Task ExitApplicationAsync() => DisconnectAndExitAsync();
+
+    private async Task DisconnectAndExitAsync()
+    {
+        if (_exiting) return;
+        _exiting = true;
+        var hasInstalledTunnel = _configs.Any(FmtTunnelService.IsInstalled);
+        if (hasInstalledTunnel)
+        {
+            SetStatus(null, "正在中斷並結束…");
+            var result = await FmtTunnelService.DisconnectAllAsync(_configs);
+            if (!result.Ok)
+            {
+                _exiting = false; RestoreFromTray();
+                SetStatus(true, "中斷失敗，仍保持連線");
+                MessageBox.Show(this, $"無法安全結束：{result.Message}\n\n請先按下「中斷連線」後再結束。", "FMT 飛貓科技 VPN 客戶端", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            _connected = false;
+        }
+        _reallyExit = true; _trayIcon.Visible = false; _trayIcon.Dispose(); Close();
+    }
 }

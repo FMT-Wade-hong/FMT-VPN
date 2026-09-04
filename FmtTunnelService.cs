@@ -4,6 +4,9 @@ namespace FeimaoTunnel;
 
 internal static class FmtTunnelService
 {
+    private static string SafeName(TunnelConfig config) => string.Concat(config.Name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+    private static string TunnelName(TunnelConfig config) => $"feimao-{SafeName(config)}";
+
     private static string? FindExe()
     {
         var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WireGuard", "wireguard.exe");
@@ -18,10 +21,10 @@ internal static class FmtTunnelService
     {
         var exe = FindExe();
         if (exe is null) return (false, "找不到 FMT 網路元件，請先安裝 FMT 用戶端元件。");
-        var safeName = string.Concat(config.Name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-        var configPath = Path.Combine(Path.GetTempPath(), $"feimao-{safeName}.conf");
+        var tunnelName = TunnelName(config);
+        var configPath = Path.Combine(Path.GetTempPath(), $"{tunnelName}.conf");
         await File.WriteAllTextAsync(configPath, config.Serialize());
-        var args = connect ? $"/installtunnelservice \"{configPath}\"" : $"/uninstalltunnelservice \"feimao-{safeName}\"";
+        var args = connect ? $"/installtunnelservice \"{configPath}\"" : $"/uninstalltunnelservice \"{tunnelName}\"";
         try
         {
             using var process = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false, CreateNoWindow = true });
@@ -31,5 +34,38 @@ internal static class FmtTunnelService
         }
         catch (System.ComponentModel.Win32Exception) { return (false, "FMT 飛貓科技 VPN 客戶端沒有足夠的系統權限。"); }
         catch (Exception ex) { return (false, ex.Message); }
+    }
+
+    public static bool IsConnected(TunnelConfig config)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("sc.exe", $"query \"WireGuardTunnel${TunnelName(config)}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
+            if (process is null) return false;
+            var output = process.StandardOutput.ReadToEnd(); process.WaitForExit();
+            return process.ExitCode == 0 && (output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase) || output.Contains("STOP_PENDING", StringComparison.OrdinalIgnoreCase));
+        }
+        catch { return false; }
+    }
+
+    public static bool IsInstalled(TunnelConfig config)
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo("sc.exe", $"query \"WireGuardTunnel${TunnelName(config)}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true });
+            if (process is null) return false;
+            process.StandardOutput.ReadToEnd(); process.WaitForExit(); return process.ExitCode == 0;
+        }
+        catch { return false; }
+    }
+
+    public static async Task<(bool Ok, string Message)> DisconnectAllAsync(IEnumerable<TunnelConfig> configs)
+    {
+        foreach (var config in configs.Where(IsInstalled))
+        {
+            var result = await SetStateAsync(config, false);
+            if (!result.Ok) return result;
+        }
+        return (true, "所有 FMT VPN 連線均已中斷。");
     }
 }
